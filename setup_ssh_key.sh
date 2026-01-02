@@ -2,80 +2,59 @@
 
 set -e
 
-echo "=== SSH Key Setup Script ==="
+echo "=== SSH Auto Key Setup ==="
 
-# Перевірка root
-if [[ $EUID -ne 0 ]]; then
-  echo "❌ Запусти скрипт від root"
-  exit 1
-fi
+# ----------- Перевірки -----------
+command -v ssh >/dev/null || { echo "❌ ssh не встановлено"; exit 1; }
+command -v ssh-keygen >/dev/null || { echo "❌ ssh-keygen не встановлено"; exit 1; }
+command -v ssh-copy-id >/dev/null || { echo "❌ ssh-copy-id не встановлено"; exit 1; }
 
-# Запит користувача
-read -p "Введи ім'я користувача: " USERNAME
+# ----------- Дані підключення -----------
+read -p "Введи IP або hostname сервера: " SERVER
+read -p "Введи користувача на сервері: " USER
+read -p "Порт SSH (Enter = 22): " PORT
+PORT=${PORT:-22}
 
-if id "$USERNAME" &>/dev/null; then
-  echo "✔ Користувач існує"
+# ----------- Ключ -----------
+DEFAULT_KEY="$HOME/.ssh/id_ed25519"
+
+if [[ -f "$DEFAULT_KEY" ]]; then
+  echo "✔ Знайдено існуючий ключ: $DEFAULT_KEY"
+  read -p "Використати його? (y/n): " USE_EXISTING
 else
-  read -p "Користувача не існує. Створити? (y/n): " CREATE_USER
-  if [[ "$CREATE_USER" == "y" ]]; then
-    useradd -m -s /bin/bash "$USERNAME"
-    echo "✔ Користувача створено"
-  else
-    echo "❌ Вихід"
-    exit 1
-  fi
+  USE_EXISTING="n"
 fi
 
-USER_HOME=$(eval echo "~$USERNAME")
-SSH_DIR="$USER_HOME/.ssh"
-AUTH_KEYS="$SSH_DIR/authorized_keys"
+if [[ "$USE_EXISTING" != "y" ]]; then
+  echo "🔐 Створення нового SSH ключа"
+  ssh-keygen -t ed25519 -f "$DEFAULT_KEY" -C "$USER@$(hostname)" -N ""
+fi
 
-mkdir -p "$SSH_DIR"
-chmod 700 "$SSH_DIR"
-chown "$USERNAME:$USERNAME" "$SSH_DIR"
-
-echo ""
-echo "Як хочеш додати ключ?"
-echo "1) Вставити вручну"
-echo "2) Взяти з файлу"
-read -p "Обери (1/2): " KEY_MODE
-
-if [[ "$KEY_MODE" == "1" ]]; then
-  echo "Встав public key (ssh-ed25519 / ssh-rsa...) і натисни Enter:"
-  read PUBKEY
-elif [[ "$KEY_MODE" == "2" ]]; then
-  read -p "Шлях до public key файлу: " KEYFILE
-  if [[ ! -f "$KEYFILE" ]]; then
-    echo "❌ Файл не знайдено"
-    exit 1
-  fi
-  PUBKEY=$(cat "$KEYFILE")
-else
-  echo "❌ Невірний вибір"
+# ----------- Перевірка доступу -----------
+echo "🔑 Підключення до сервера (введи пароль користувача $USER)..."
+ssh -p "$PORT" "$USER@$SERVER" "echo '✔ Підключення успішне'" || {
+  echo "❌ Не вдалося підключитись"
   exit 1
-fi
+}
 
-echo "$PUBKEY" >> "$AUTH_KEYS"
+# ----------- Копіювання ключа -----------
+echo "📤 Копіюємо ключ на сервер..."
+ssh-copy-id -i "$DEFAULT_KEY.pub" -p "$PORT" "$USER@$SERVER"
 
-chmod 600 "$AUTH_KEYS"
-chown "$USERNAME:$USERNAME" "$AUTH_KEYS"
-
-echo "✔ Ключ додано"
-
-# Пропозиція вимкнути парольну авторизацію
-read -p "Вимкнути парольну авторизацію SSH? (y/n): " DISABLE_PASS
+# ----------- Вимкнення паролю (опційно) -----------
+read -p "Вимкнути парольну авторизацію на сервері? (y/n): " DISABLE_PASS
 
 if [[ "$DISABLE_PASS" == "y" ]]; then
-  SSHD_CONFIG="/etc/ssh/sshd_config"
-
-  sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' "$SSHD_CONFIG"
-  sed -i 's/^#\?ChallengeResponseAuthentication .*/ChallengeResponseAuthentication no/' "$SSHD_CONFIG"
-  sed -i 's/^#\?UsePAM .*/UsePAM no/' "$SSHD_CONFIG"
-
-  systemctl restart sshd
-  echo "✔ Парольну авторизацію вимкнено"
+  ssh -p "$PORT" "$USER@$SERVER" << 'EOF'
+sudo sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo sed -i 's/^#\?ChallengeResponseAuthentication .*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
+sudo sed -i 's/^#\?UsePAM .*/UsePAM no/' /etc/ssh/sshd_config
+sudo systemctl restart sshd
+EOF
+  echo "🔒 Парольну авторизацію вимкнено"
 fi
 
 echo ""
-echo "✅ Готово. Можеш підключатись:"
-echo "ssh $USERNAME@<server_ip>"
+echo "✅ ГОТОВО"
+echo "Тепер можеш підключатись так:"
+echo "ssh -p $PORT $USER@$SERVER"
